@@ -1,0 +1,16 @@
+{
+  "id": "./",
+  "name": "成长世界 · 一步一方块",
+  "short_name": "成长世界",
+  "description": "每天一个探宝节点，完成小任务，收集绿宝石。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#d7e4c9",
+  "theme_color": "#294c39",
+  "icons": [
+    {"src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
