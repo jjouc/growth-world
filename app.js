@@ -19,10 +19,18 @@ const legacyDefaultState = () => ({version:1, settings:{nickname:'小小建造�
 let state, db, page='today', selectedDate=dateKey(), monthOffset=0, busy=false, pendingImport=null;
 let filters={subject:'全部科目',kind:'全部类型'}, toastTimer;
 const countDay = day => (day?.tasks || []).filter(Boolean).length;
+const extraTasks = ['英语语法学习','语文默写','数学计算','体育跳绳'];
+const countRuby = day => (day?.extraTasks || []).filter(Boolean).length;
 const earned = (s=state) => Object.values(s.days).reduce((a,d)=>a+countDay(d),0);
+const rubyEarned = (s=state) => Object.values(s.days).reduce((a,d)=>a+countRuby(d),0);
 const spent = (s=state) => s.redemptions.reduce((a,r)=>a+r.cost,0)+(s.draws||[]).filter(r=>r.currency==='emerald').reduce((a,r)=>a+r.cost,0);
-const balance = (s=state) => earned(s)-spent(s);
-const dayData = () => state.days[selectedDate] || {tasks:[false,false,false],difficulty:'',childNote:'',parentNote:'',diamond:false,finishedAt:null,qualityChecks:[false,false,false]};
+const rubySpent = (s=state) => [...s.redemptions,...(s.draws||[]).filter(r=>r.currency==='emerald')].reduce((a,r)=>a+(r.rubyCost||0),0);
+const emeraldBalance = (s=state) => earned(s)-(spent(s)-rubySpent(s));
+const rubyBalance = (s=state) => rubyEarned(s)-rubySpent(s);
+const balance = (s=state) => emeraldBalance(s)+rubyBalance(s);
+const payment = (cost,s=state) => ({rubyCost:Math.max(0,cost-emeraldBalance(s))});
+const paymentLabel = r => [(r.cost-(r.rubyCost||0))+' 颗绿宝石',r.rubyCost?r.rubyCost+' 颗红宝石':''].filter(Boolean).join(' + ');
+const dayData = () => state.days[selectedDate] || {tasks:[false,false,false],difficulty:'',childNote:'',parentNote:'',diamond:false,finishedAt:null,qualityChecks:[false,false,false],extraTasks:[null,null,null,null]};
 const recordSubjectClass = s => s==='数学'?'math':s==='英语'?'english':'';
 
 function validateLegacyState(s) {
@@ -64,27 +72,31 @@ const diamondEarned=(s=state)=>Object.values(s.days).filter(d=>d.diamond).length
 const diamondSpent=(s=state)=>(s.draws||[]).filter(r=>r.currency==='diamond').reduce((a,r)=>a+r.cost,0);
 const diamondBalance=(s=state)=>diamondEarned(s)-diamondSpent(s);
 const isWeekend=key=>[0,6].includes(localDate(key).getDay());
+const isWednesday=key=>localDate(key).getDay()===3;
 const plannedTime=key=>isWeekend(key)?state.plans[key]||'':state.settings.startTime;
 const currentTime=()=>new Date().toTimeString().slice(0,5);
 function requireToday(){if(selectedDate!==dateKey())throw new Error('这一天已结束，只能查看，不能补打卡或修改任务。');}
 function validateState(raw){
  let s=structuredClone(raw);
  if(s?.version===1){validateLegacyState(s);s.version=2;s.plans={};s.draws=[];Object.values(s.days).forEach(d=>Object.assign(d,{diamond:false,finishedAt:null,qualityChecks:[false,false,false]}));}
- if(!s||s.version!==2)throw new Error('不支持的备份版本。');
+ if(s?.version===2){s.version=3;Object.values(s.days).forEach(d=>d.extraTasks=[null,null,null,null]);s.redemptions.forEach(r=>r.rubyCost=0);s.draws.forEach(r=>r.rubyCost=0);}
+ if(!s||s.version!==3)throw new Error('不支持的备份版本。');
  const legacy=structuredClone(s);legacy.version=1;legacy.draws=[];validateLegacyState(legacy);
- const fail=()=>{throw new Error('备份中的钻石、计划或卡片数据不正确。');};
+ const fail=()=>{throw new Error('备份中的宝石、额外任务、计划或卡片数据不正确。');};
  const time=v=>typeof v==='string'&&/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(v);
  const validDate=v=>typeof v==='string'&&/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(v)&&!isNaN(localDate(v))&&dateKey(localDate(v))===v&&v>='2000-01-01'&&v<='2100-12-31';
  const stamp=v=>typeof v==='string'&&v.length<=40&&!isNaN(Date.parse(v));
  if(!s.plans||typeof s.plans!=='object'||Array.isArray(s.plans)||Object.keys(s.plans).length>37000)fail();
  for(const [key,v] of Object.entries(s.plans))if(!validDate(key)||!isWeekend(key)||!time(v))fail();
- for(const d of Object.values(s.days)){
+ for(const [key,d] of Object.entries(s.days)){
+  if(!Array.isArray(d.extraTasks)||d.extraTasks.length!==4||!d.extraTasks.every(v=>v===null||(time(v)&&v<='20:30'))||(!isWednesday(key)&&countRuby(d)>0))fail();
   if(typeof d.diamond!=='boolean'||!Array.isArray(d.qualityChecks)||d.qualityChecks.length!==3||!d.qualityChecks.every(v=>typeof v==='boolean')||(d.finishedAt!==null&&!time(d.finishedAt)))fail();
   if(d.diamond&&(!d.qualityChecks.every(Boolean)||!d.finishedAt||d.finishedAt>'20:00'))fail();
  }
  if(!Array.isArray(s.draws)||s.draws.length>10000)fail();const ids=new Set();
  for(const r of s.draws){if(!r||typeof r.id!=='string'||!r.id||r.id.length>100||ids.has(r.id)||!cardTypes.some(c=>c.id===r.cardId)||!['emerald','diamond'].includes(r.currency)||r.cost!==(r.currency==='emerald'?20:1)||!stamp(r.createdAt)||(r.usedAt!==null&&!stamp(r.usedAt)))fail();ids.add(r.id);}
- if(balance(s)<0||diamondBalance(s)<0)fail();return s;
+ for(const r of [...s.redemptions,...s.draws])if(!Number.isInteger(r.rubyCost)||r.rubyCost<0||r.rubyCost>r.cost||(r.currency==='diamond'&&r.rubyCost!==0))fail();
+ if(emeraldBalance(s)<0||rubyBalance(s)<0||diamondBalance(s)<0)fail();return s;
 }
 const monthThemes=[
  ['雪原探宝记','积雪平原','#e4ede0','#cdddc4','#b6d8e8','snow'],['冰河探宝记','冰刺平原','#dbe9e9','#bfd8dd','#a6cddf','ice'],
@@ -192,7 +204,7 @@ function monthDates() {
 }
 function render() {
  if(!state)return;
- $('#greeting').textContent=state.settings.nickname+'的探宝手册';$('#balance').textContent=balance();$('#diamond-balance').textContent=diamondBalance();
+ $('#greeting').textContent=state.settings.nickname+'的探宝手册';$('#balance').textContent=emeraldBalance();$('#ruby-balance').textContent=rubyBalance();$('#diamond-balance').textContent=diamondBalance();
  $$('.nav-item').forEach(b=>{b.classList.toggle('active',b.dataset.page===page);if(b.dataset.page===page)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
  $('#content').innerHTML=({today:renderToday,records:renderRecords,rewards:renderRewards}[page]||renderToday)();
 }
@@ -201,7 +213,7 @@ function renderToday() {
  const points=dates.map((key,i)=>{const row=Math.floor(i/cols),col=row%2?cols-1-i%cols:i%cols;return {key,x:12+76*col/(cols-1),y:61+112*row};});
  let path='M '+points[0].x*10+' '+points[0].y;
  points.slice(1).forEach((p,i)=>{const prev=points[i];if(p.y===prev.y)path+=' L '+p.x*10+' '+p.y;else{const edge=p.x>50?65:-65;path+=' C '+(prev.x*10+edge)+' '+prev.y+' '+(p.x*10+edge)+' '+p.y+' '+p.x*10+' '+p.y;}});
- const visited=dates.filter(k=>countDay(state.days[k])>0).length;
+ const visited=dates.filter(k=>countDay(state.days[k])+countRuby(state.days[k])+(state.days[k]?.diamond?1:0)>0).length;
  const month=localDate(dates[0]).toLocaleDateString('zh-CN',{year:'numeric',month:'long'});
  const decor=[];
  for(let row=0;row<rows;row++){
@@ -213,8 +225,8 @@ function renderToday() {
  decor.push('<span class="map-scenery scenery-house" style="left:48%;top:3%">'+pixelIcon('house')+'</span>');
  return '<section class="adventure"><div class="adventure-heading"><div><div class="chapter-label">'+esc(theme[1])+'</div><h1>'+esc(theme[0])+'</h1><p>每天一个小站，走出自己的冒险路线。</p></div><button class="pixel-button today-entry" data-action="open-today">'+pixelIcon('flag')+' 今天的小任务</button></div><div class="map-frame"><div class="map-toolbar"><div class="month-navigation"><button data-action="prev-month" class="map-arrow" aria-label="上个月" '+(dates[0]<='2000-01-01'?'disabled':'')+'>‹</button><strong>'+month+'</strong><button data-action="next-month" class="map-arrow" aria-label="下个月" '+(monthOffset>=0?'disabled':'')+'>›</button></div><span class="map-count">本月已探索 <strong>'+visited+'</strong> 天</span></div><div class="treasure-map" style="--map-height:'+height+'px;--map-ground:'+theme[2]+';--map-patch:'+theme[3]+';--map-pond:'+theme[4]+'"><div class="map-terrain" aria-hidden="true"><div class="map-pond"></div><div class="map-grass patch-one"></div><div class="map-grass patch-two"></div>'+decor.join('')+'</div><svg class="map-route" viewBox="0 0 1000 '+height+'" preserveAspectRatio="none" aria-hidden="true"><path d="'+path+'" class="road-edge"/><path d="'+path+'" class="road-fill"/><path d="'+path+'" class="road-dashes"/></svg>'+points.map((p,i)=>{
   const n=countDay(state.days[p.key]),today=p.key===dateKey(),future=p.key>dateKey(),final=i===points.length-1;
-  return '<button class="day-node'+(n===3?' completed':n?' explored':'')+(today?' is-today':'')+(future?' is-future':'')+(final?' treasure-node':'')+'" data-action="open-day" data-date="'+p.key+'" style="left:'+p.x+'%;top:'+p.y/height*100+'%" aria-label="'+prettyDate(p.key)+'，'+(future?'还没到这一天':n+' 个任务已完成')+'" '+(future?'disabled':'')+'>'+(today?'<span class="you-are-here">你在这里</span>':'')+'<span class="node-surface">'+(final?pixelIcon('chest'):'<span class="node-number">'+(i+1)+'</span>')+(n===3?'<span class="node-check" aria-hidden="true">✓</span>':'')+'</span><span class="node-caption">'+(final?(i+1)+'日 · 宝藏站':today?'今天':(i+1)+'日')+'</span><span class="node-stars" aria-hidden="true">'+Array.from({length:3},(_,j)=>'<i class="'+(j<n?'filled':'')+'"></i>').join('')+'</span>'+(state.days[p.key]?.diamond?'<span class="map-diamond diamond" aria-label="获得钻石"></span>':'')+'</button>';
- }).join('')+'</div><div class="map-legend"><span><i class="legend-today"></i>今天</span><span><i class="legend-done"></i>绿宝石任务完成</span><span><i class="legend-future"></i>还没到这一天</span><span class="map-tip">点一个节点，打开当天任务</span></div></div><p class="adventure-footnote">每完成一个小任务，获得一颗绿宝石。仅当天可打卡，过去日期保留查看。</p></section>';
+  return '<button class="day-node'+(n===3?' completed':n?' explored':'')+(today?' is-today':'')+(future?' is-future':'')+(final?' treasure-node':'')+'" data-action="open-day" data-date="'+p.key+'" style="left:'+p.x+'%;top:'+p.y/height*100+'%" aria-label="'+prettyDate(p.key)+'，'+(future?'还没到这一天':n+' 个普通任务已完成，获得 '+n+' 颗绿宝石、'+countRuby(state.days[p.key])+' 颗红宝石、'+(state.days[p.key]?.diamond?1:0)+' 颗钻石')+'" '+(future?'disabled':'')+'>'+(today?'<span class="you-are-here">你在这里</span>':'')+'<span class="node-surface">'+(final?pixelIcon('chest'):'<span class="node-number">'+(i+1)+'</span>')+(n===3?'<span class="node-check" aria-hidden="true">✓</span>':'')+'</span><span class="node-caption">'+(final?(i+1)+'日 · 宝藏站':today?'今天':(i+1)+'日')+'</span><span class="node-stars" aria-hidden="true">'+Array.from({length:3},(_,j)=>'<i class="'+(j<n?'filled':'')+'"></i>').join('')+'</span>'+(!future?dailyGems(state.days[p.key]):'')+'</button>';
+ }).join('')+'</div><div class="map-legend"><span><i class="legend-today"></i>今天</span><span><i class="legend-done"></i>绿宝石任务完成</span><span><i class="legend-future"></i>还没到这一天</span><span class="map-tip">点一个节点，打开当天任务</span></div></div><p class="adventure-footnote">节点下方显示当天获得的宝石数量：绿宝石、红宝石、钻石。仅当天可打卡，过去日期保留查看。</p></section>';
 }
 function dayDialog(){
  const d=dayData(),active=selectedDate===dateKey(),time=plannedTime(selectedDate);
@@ -223,9 +235,22 @@ function dayDialog(){
   {icon:'⚒',title:'困难有办法',text:'圈出来，说卡点，得到提示后继续一小步。'},
   {icon:'▤',title:'完成后自己检查',text:'查作业有没有漏，再检查错别字并订正。'}
  ];
- dialog(prettyDate(selectedDate)+'的小任务','<div class="day-dialog-summary"><span>'+(!active?'已结束 · 仅查看记录':'每个小任务获得一颗绿宝石。')+'</span><strong>'+countDay(d)+' / 3</strong></div><div class="day-tasks">'+tasks.map((t,i)=>'<article class="task'+(d.tasks[i]?' done':'')+'"><span class="task-icon" aria-hidden="true">'+t.icon+'</span><div class="day-task-copy"><h3>'+t.title+'</h3><p>'+esc(t.text)+'</p>'+(i===0&&isWeekend(selectedDate)&&active?'<button class="task-extra" data-action="plan-day">'+(time?'查看 / 修改今日约定':'约定今天的开始时间')+'</button>':'')+(i===1?'<button class="task-extra" data-action="difficulty" '+(!active?'disabled':'')+'>'+esc(d.difficulty||'查看三步卡 / 今天没有卡住')+'</button>':'')+'</div><button class="task-button" data-action="task" data-index="'+i+'" aria-label="'+t.title+'：'+(d.tasks[i]?'已完成，点击修正':'我做到了')+'" aria-pressed="'+d.tasks[i]+'" '+(!active||(i===0&&!time)?'disabled':'')+'><span class="emerald '+(!d.tasks[i]?'gem-empty':'')+'" aria-hidden="true"></span><span>'+(d.tasks[i]?'已完成':!active?'已结束':'做到了')+'</span></button></article>').join('')+'<article class="task diamond-task'+(d.diamond?' done':'')+'"><span class="task-icon"><span class="diamond" aria-hidden="true"></span></span><div class="day-task-copy"><h3>20:00 前高质量完成</h3><p>完成清单、检查错别字、处理不会的题。家长确认，获得一颗钻石。</p>'+(d.diamond?'<span class="small">完成时间 '+esc(d.finishedAt)+'</span>':'')+'</div><button class="task-button" data-action="diamond-task" aria-label="钻石任务'+(d.diamond?'已完成':'家长确认')+'" '+(!active?'disabled':'')+'><span class="diamond '+(!d.diamond?'gem-empty':'')+'" aria-hidden="true"></span><span>'+(d.diamond?'已完成':!active?'已结束':'家长确认')+'</span></button></article></div><div class="day-dialog-footer"><span>'+(active?'小任务得绿宝石，按时认真完成得钻石。':'过去的宝藏已经保存，今天继续前进。')+'</span><button class="pixel-button" data-close>回到地图</button></div>');
+ dialog(prettyDate(selectedDate)+'的小任务','<div class="day-dialog-summary"><span>'+(!active?'已结束 · 仅查看记录':'每个小任务获得一颗绿宝石。')+'</span><strong>'+countDay(d)+' / 3</strong></div><div class="day-tasks">'+tasks.map((t,i)=>'<article class="task'+(d.tasks[i]?' done':'')+'"><span class="task-icon" aria-hidden="true">'+t.icon+'</span><div class="day-task-copy"><h3>'+t.title+'</h3><p>'+esc(t.text)+'</p>'+(i===0&&isWeekend(selectedDate)&&active?'<button class="task-extra" data-action="plan-day">'+(time?'查看 / 修改今日约定':'约定今天的开始时间')+'</button>':'')+(i===1?'<button class="task-extra" data-action="difficulty" '+(!active?'disabled':'')+'>'+esc(d.difficulty||'查看三步卡 / 今天没有卡住')+'</button>':'')+'</div><button class="task-button" data-action="task" data-index="'+i+'" aria-label="'+t.title+'：'+(d.tasks[i]?'已完成，点击修正':'我做到了')+'" aria-pressed="'+d.tasks[i]+'" '+(!active||(i===0&&!time)?'disabled':'')+'><span class="emerald '+(!d.tasks[i]?'gem-empty':'')+'" aria-hidden="true"></span><span>'+(d.tasks[i]?'已完成':!active?'已结束':'做到了')+'</span></button></article>').join('')+'<article class="task diamond-task'+(d.diamond?' done':'')+'"><span class="task-icon"><span class="diamond" aria-hidden="true"></span></span><div class="day-task-copy"><h3>20:00 前高质量完成</h3><p>完成清单、检查错别字、处理不会的题。家长确认，获得一颗钻石。</p>'+(d.diamond?'<span class="small">完成时间 '+esc(d.finishedAt)+'</span>':'')+'</div><button class="task-button" data-action="diamond-task" aria-label="钻石任务'+(d.diamond?'已完成':'家长确认')+'" '+(!active?'disabled':'')+'><span class="diamond '+(!d.diamond?'gem-empty':'')+'" aria-hidden="true"></span><span>'+(d.diamond?'已完成':!active?'已结束':'家长确认')+'</span></button></article></div>'+extraTaskList(d,active)+'<div class="day-dialog-footer"><span>'+(active?'小任务得绿宝石，按时认真完成得钻石。':'过去的宝藏已经保存，今天继续前进。')+'</span><button class="pixel-button" data-close>回到地图</button></div>');
 }
 function weekendDates(){const d=localDate(dateKey());d.setDate(d.getDate()+(6-d.getDay()+7)%7);const next=new Date(d);next.setDate(next.getDate()+1);return [dateKey(d),dateKey(next)];}
+function dailyGems(d){
+ const green=countDay(d),red=countRuby(d),diamond=d?.diamond?1:0,total=green+red+diamond;
+ return '<span class="daily-gems" aria-hidden="true">'+(total?'<span class="daily-gem-total">'+total+' 颗</span><span class="daily-gem-detail"><span class="emerald"></span>'+green+' <span class="ruby"></span>'+red+' <span class="diamond"></span>'+diamond+'</span>':'<span class="daily-gem-zero">0 颗</span>')+'</span>';
+}
+function extraTaskList(d,active){
+ if(!isWednesday(selectedDate))return '';
+ return '<section class="extra-study"><h3>周三额外学习 · 红宝石奖励</h3><p>晚上 20:30 前，每完成一项获得 1 颗红宝石。每项当天只领取一次，和绿宝石等值。</p><div class="day-tasks">'+extraTasks.map((name,i)=>'<article class="task ruby-task'+(d.extraTasks[i]?' done':'')+'"><span class="task-icon"><span class="ruby"></span></span><div class="day-task-copy"><h3>'+name+'</h3><p>'+(d.extraTasks[i]?'完成时间 '+esc(d.extraTasks[i]):'完成与家长约定的这一项学习内容。')+'</p></div><button class="task-button" data-action="ruby-task" data-index="'+i+'" aria-label="'+name+'：'+(d.extraTasks[i]?'已完成，点击修正':'领取红宝石')+'" '+(!active?'disabled':'')+'><span class="ruby '+(!d.extraTasks[i]?'gem-empty':'')+'"></span><span>'+(d.extraTasks[i]?'已完成':active?'做到了':'已结束')+'</span></button></article>').join('')+'</div></section>';
+}
+function rubyDialog(i){
+ if(selectedDate!==dateKey()||!isWednesday(selectedDate)||!Number.isInteger(i)||i<0||i>=extraTasks.length)return;
+ if(dayData().extraTasks[i]){confirmDialog('修正额外任务？','只用于修正误点。已用于兑换的红宝石不能产生负余额。','undo-ruby',String(i),'修正记录');return;}
+ dialog(extraTasks[i]+' · 红宝石','<form id="ruby-form" data-index="'+i+'"><p class="small">完成与家长约定的这一项内容，获得 1 颗红宝石。</p><label class="field">实际完成时间（晚上，不晚于 20:30）<input name="finishedAt" type="time" max="20:30" required value="'+(currentTime()<='20:30'?currentTime():'')+'"></label><p class="small">当天晚些时候也可记录真实完成时间，过期不能补打卡。</p><div class="dialog-actions"><button type="button" class="secondary" data-action="return-day">返回任务</button><button type="submit" class="primary">确认，获得红宝石</button></div></form>');
+}
 function planDialog(){
  if(selectedDate!==dateKey()||!isWeekend(selectedDate))return;
  dialog('约定今天的开始时间','<form id="plan-form"><p class="small">最好前一晚一起约定。今天只按这个时间判断“开始第一项”。</p><label class="field">'+prettyDate(selectedDate)+'<input name="planTime" type="time" required value="'+esc(state.plans[selectedDate]||'')+'"></label><div class="dialog-actions"><button type="button" class="secondary" data-action="return-day">返回任务</button><button type="submit" class="primary">保存约定</button></div></form>');
@@ -238,7 +263,7 @@ function diamondDialog(){
 }
 function renderBlindBox(){
  const cards=state.draws.slice().sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
- return '<section class="blind-box"><div class="blind-box-art">'+pixelIcon('chest')+'<span>?</span></div><div class="blind-box-copy"><span class="chapter-label">村民的惊喜卡包</span><h2>今天会开出什么卡？</h2><p>20 颗绿宝石，或 1 颗钻石，抽一次。</p><div class="draw-buttons"><button class="primary" data-action="draw-box" data-currency="emerald" '+(balance()<20?'disabled':'')+'><span class="emerald"></span>20 颗绿宝石</button><button class="primary diamond-button" data-action="draw-box" data-currency="diamond" '+(diamondBalance()<1?'disabled':'')+'><span class="diamond"></span>1 颗钻石</button></div><button class="text-link" data-action="box-rules">查看七种卡片和规则</button></div></section><section class="panel card-collection"><h2>我的卡片清单</h2><p class="panel-sub">抽到后保存在这里，完成或使用后由家长核销。</p>'+(cards.length?'<div class="collected-cards">'+cards.map(r=>{const c=cardTypes.find(c=>c.id===r.cardId);return '<article class="collected-card'+(r.usedAt?' used':'')+'"><span class="card-symbol">'+c.icon+'</span><div><h3>'+esc(c.name)+'</h3><p>'+esc(c.description)+'</p><small>'+new Date(r.createdAt).toLocaleDateString('zh-CN')+' · '+(r.currency==='emerald'?'20 颗绿宝石':'1 颗钻石')+' · '+(r.usedAt?'已核销':c.kind==='outing'?'待安排':'待使用 / 完成')+'</small></div>'+(r.usedAt?'<span class="tag ok">已核销</span>':'<button class="secondary" data-action="use-card" data-id="'+esc(r.id)+'">家长核销</button>')+'</article>';}).join('')+'</div>':'<div class="muted-block">抽到的电视卡、家务卡和出游卡都会出现在这里。</div>')+'</section>';
+ return '<section class="blind-box"><div class="blind-box-art">'+pixelIcon('chest')+'<span>?</span></div><div class="blind-box-copy"><span class="chapter-label">村民的惊喜卡包</span><h2>今天会开出什么卡？</h2><p>绿宝石和红宝石合计 20 颗，或 1 颗钻石，抽一次。</p><div class="draw-buttons"><button class="primary" data-action="draw-box" data-currency="emerald" '+(balance()<20?'disabled':'')+'><span class="emerald"></span><span class="ruby"></span>合计 20 颗</button><button class="primary diamond-button" data-action="draw-box" data-currency="diamond" '+(diamondBalance()<1?'disabled':'')+'><span class="diamond"></span>1 颗钻石</button></div><p class="gem-payment-note">红宝石和绿宝石等值，可混合使用；先用绿宝石，再用红宝石。</p><button class="text-link" data-action="box-rules">查看七种卡片和规则</button></div></section><section class="panel card-collection"><h2>我的卡片清单</h2><p class="panel-sub">抽到后保存在这里，完成或使用后由家长核销。</p>'+(cards.length?'<div class="collected-cards">'+cards.map(r=>{const c=cardTypes.find(c=>c.id===r.cardId);return '<article class="collected-card'+(r.usedAt?' used':'')+'"><span class="card-symbol">'+c.icon+'</span><div><h3>'+esc(c.name)+'</h3><p>'+esc(c.description)+'</p><small>'+new Date(r.createdAt).toLocaleDateString('zh-CN')+' · '+(r.currency==='emerald'?paymentLabel(r):'1 颗钻石')+' · '+(r.usedAt?'已核销':c.kind==='outing'?'待安排':'待使用 / 完成')+'</small></div>'+(r.usedAt?'<span class="tag ok">已核销</span>':'<button class="secondary" data-action="use-card" data-id="'+esc(r.id)+'">家长核销</button>')+'</article>';}).join('')+'</div>':'<div class="muted-block">抽到的电视卡、家务卡和出游卡都会出现在这里。</div>')+'</section>';
 }
 function boxRules(){dialog('盲盒里的七种卡','<div class="box-rules">'+cardTypes.map(c=>'<div><span>'+c.icon+'</span><p><strong>'+esc(c.name)+'</strong><small>'+esc(c.description)+'</small></p></div>').join('')+'</div><p class="small">七种卡机会相同，每种 1/7，可以抽到重复卡。确认后扣除所选宝石并保存结果，不能取消抽取或退回宝石重抽。</p><div class="dialog-actions"><button class="primary" data-close>知道啦</button></div>');}
 function chooseCard(){const range=4294967296,limit=Math.floor(range/cardTypes.length)*cardTypes.length;const value=new Uint32Array(1);do{crypto.getRandomValues(value);}while(value[0]>=limit);return cardTypes[value[0]%cardTypes.length];}
@@ -256,9 +281,9 @@ function recordCard(r) {
 function renderRewards() {
  const b=balance(),history=state.redemptions.slice().sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
  return renderBlindBox()+heading('村民商店','把小小的努力，换成一起期待的好时光。','<button class="secondary" data-action="new-reward">＋ 和家长约定奖励</button>')+
- '<div class="info-strip" style="margin-top:0;margin-bottom:22px">累计获得 '+earned()+' 颗 · 已兑换使用 '+spent()+' 颗 · 现在有 '+b+' 颗绿宝石。日常陪伴、拥抱和基本玩耍时间照常。</div>'+
+ '<div class="info-strip" style="margin-top:0;margin-bottom:22px">累计获得 '+(earned()+rubyEarned())+' 颗 · 已兑换使用 '+spent()+' 颗 · 现在有 '+b+' 颗绿宝石与红宝石（等值，可合用）。日常陪伴、拥抱和基本玩耍时间照常。</div>'+
  (state.rewards.length?'<div class="shop-grid">'+state.rewards.map(r=>'<article class="shop-card"><div class="shop-illustration"><span aria-hidden="true">'+esc(r.icon)+'</span></div><div class="shop-body"><h3>'+esc(r.name)+'</h3><p>'+esc(r.description)+'</p><div class="row"><span class="price"><span class="emerald" aria-hidden="true"></span>'+r.cost+' 颗</span><button class="primary" data-action="redeem" data-id="'+esc(r.id)+'" '+(b<r.cost?'disabled':'')+'>'+(b>=r.cost?'兑换奖励':'还差 '+(r.cost-b)+' 颗')+'</button></div></div></article>').join('')+'</div>':empty('先一起约定一份小期待','选一个孩子喜欢、家长也方便兑现的奖励。','<button class="primary" data-action="new-reward">添加奖励</button>'))+
- '<section class="panel" style="margin-top:23px"><h2>已经兑换的小期待</h2><p class="panel-sub">兑换后，历史方块仍然保留。家长兑现后点一下确认。</p>'+(history.length?history.map(r=>'<div class="history-line"><div>'+esc(r.name)+'<small>'+new Date(r.createdAt).toLocaleDateString('zh-CN')+' · '+r.cost+' 颗绿宝石 · '+(r.fulfilledAt?'已兑现':'待家长兑现')+'</small></div>'+(r.fulfilledAt?'<span class="tag ok">已兑现 ✓</span>':'<div><button class="secondary" data-action="fulfill" data-id="'+esc(r.id)+'">确认兑现</button><button class="quiet" data-action="cancel-redemption" data-id="'+esc(r.id)+'">取消</button></div>')+'</div>').join(''):'<div class="muted-block">你的第一份小期待，正在路上。</div>')+'</section>';
+ '<section class="panel" style="margin-top:23px"><h2>已经兑换的小期待</h2><p class="panel-sub">兑换后，历史方块仍然保留。家长兑现后点一下确认。</p>'+(history.length?history.map(r=>'<div class="history-line"><div>'+esc(r.name)+'<small>'+new Date(r.createdAt).toLocaleDateString('zh-CN')+' · '+paymentLabel(r)+' · '+(r.fulfilledAt?'已兑现':'待家长兑现')+'</small></div>'+(r.fulfilledAt?'<span class="tag ok">已兑现 ✓</span>':'<div><button class="secondary" data-action="fulfill" data-id="'+esc(r.id)+'">确认兑现</button><button class="quiet" data-action="cancel-redemption" data-id="'+esc(r.id)+'">取消</button></div>')+'</div>').join(''):'<div class="muted-block">你的第一份小期待，正在路上。</div>')+'</section>';
 }
 
 function recordDialog(id) {
@@ -280,13 +305,13 @@ async function updateOfflineStatus() {
  if(location.protocol==='file:'){el.textContent='直接打开文件不支持可靠的安装与离线缓存，请通过网页服务打开。';return;}
  if(!('serviceWorker' in navigator)||!window.isSecureContext){el.textContent='当前地址不支持离线安装。正式使用需要 HTTPS；电脑 localhost 可预览。';return;}
  const registration=await navigator.serviceWorker.getRegistration();
- const cache=await caches.open('growth-world-v3'); const ready=await cache.match('./index.html');
+ const cache=await caches.open('growth-world-v4'); const ready=await cache.match('./index.html');
  if(!el.isConnected)return;
  el.textContent=registration?.active&&ready?'离线文件已准备好。可以断网打开；记录仍保存在此设备。':'离线文件正在准备，请保持联网后重新查看。';
 }
 function rewardDialog(id) {
  const r=id?state.rewards.find(r=>r.id===id):{name:'',description:'',cost:8,icon:'🎁'};if(!r)return;
- dialog(id?'修改约定奖励':'一起约定小奖励','<form id="reward-form" data-id="'+esc(id||'')+'" class="reward-form"><label class="field">奖励名称<input name="name" required maxlength="60" placeholder="例如：一起搭一个方块小屋" value="'+esc(r.name)+'"></label><label class="field">具体约定<textarea name="description" maxlength="200" placeholder="约定时长、时间或预算，让奖励容易兑现。">'+esc(r.description)+'</textarea></label><div class="form-grid"><label class="field">需要的绿宝石<input name="cost" type="number" inputmode="numeric" min="1" max="10000" step="1" required value="'+r.cost+'"></label><label class="field">奖励图标<select name="icon">'+options(['🎁','🎮','🎬','🌳','🧱','📚','🍜','🚲','🎨','🧩'],r.icon)+'</select></label></div><p class="small">第一份奖励可以从 8 颗开始，根据孩子目前能做到的程度调整。基本陪伴不需要兑换。</p><div class="dialog-actions"><button class="secondary" type="button" data-close>取消</button><button class="primary" type="submit">保存约定</button></div></form>');
+ dialog(id?'修改约定奖励':'一起约定小奖励','<form id="reward-form" data-id="'+esc(id||'')+'" class="reward-form"><label class="field">奖励名称<input name="name" required maxlength="60" placeholder="例如：一起搭一个方块小屋" value="'+esc(r.name)+'"></label><label class="field">具体约定<textarea name="description" maxlength="200" placeholder="约定时长、时间或预算，让奖励容易兑现。">'+esc(r.description)+'</textarea></label><div class="form-grid"><label class="field">需要的宝石（绿 / 红等值）<input name="cost" type="number" inputmode="numeric" min="1" max="10000" step="1" required value="'+r.cost+'"></label><label class="field">奖励图标<select name="icon">'+options(['🎁','🎮','🎬','🌳','🧱','📚','🍜','🚲','🎨','🧩'],r.icon)+'</select></label></div><p class="small">第一份奖励可以从 8 颗开始，根据孩子目前能做到的程度调整。基本陪伴不需要兑换。</p><div class="dialog-actions"><button class="secondary" type="button" data-close>取消</button><button class="primary" type="submit">保存约定</button></div></form>');
 }
 function confirmDialog(title,description,action,id,label='确认') {
  dialog(title,'<p>'+esc(description)+'</p><div class="dialog-actions"><button class="secondary" data-close>取消</button><button class="primary" data-action="'+action+'" data-id="'+esc(id||'')+'">'+label+'</button></div>');
@@ -300,7 +325,7 @@ document.addEventListener('click',async event=>{
  if(b.id==='wallet-btn'){go('rewards');return;}
  const id=b.dataset.id, action=b.dataset.action;
  if(!action||busy)return;
- if(['task','undo-task','difficulty','diamond-task','undo-diamond','plan-day'].includes(action)&&selectedDate!==dateKey()){toast('过期日期只能查看，不能再打卡。');return;}
+ if(['task','undo-task','difficulty','diamond-task','undo-diamond','plan-day','ruby-task','undo-ruby'].includes(action)&&selectedDate!==dateKey()){toast('过期日期只能查看，不能再打卡。');return;}
  if(action==='task') {
    const i=Number(b.dataset.index),d=dayData();
    if(i===0&&!plannedTime(selectedDate)){planDialog();return;}
@@ -309,11 +334,15 @@ document.addEventListener('click',async event=>{
    const ok=await commit(s=>{requireToday();const day=s.days[selectedDate] ||= structuredClone(d);day.tasks[i]=true;},'获得 1 颗绿宝石。');if(ok)dayDialog();
  }
  if(action==='undo-task') {
-   if(balance()<1){formError('这颗绿宝石已经用于兑换。请先取消尚未兑现的兑换，再修正记录。');return;}
+   if(emeraldBalance()<1){formError('这颗绿宝石已经用于兑换。请先取消尚未兑现的兑换，再修正记录。');return;}
    const i=Number(id);const ok=await commit(s=>{requireToday();s.days[selectedDate].tasks[i]=false;if(i===1)s.days[selectedDate].difficulty='';},'记录已修正。',true);if(ok)dayDialog();
  }
  if(action==='difficulty')difficultyDialog();
  if(action==='diamond-task')diamondDialog();
+ if(action==='ruby-task')rubyDialog(Number(b.dataset.index));
+ if(action==='undo-ruby'){
+  const i=Number(id);const ok=await commit(s=>{requireToday();if(!isWednesday(selectedDate)||!Number.isInteger(i)||i<0||i>=4)throw new Error('额外任务不正确。');if(rubyBalance(s)<1)throw new Error('这颗红宝石已用于兑换，不能修正。');s.days[selectedDate].extraTasks[i]=null;},'额外任务已修正。',true);if(ok)dayDialog();
+ }
  if(action==='plan-day')planDialog();
  if(action==='back-today'){selectedDate=dateKey();render();}
  if(action==='new-record')recordDialog();
@@ -329,12 +358,12 @@ document.addEventListener('click',async event=>{
  if(action==='draw-box'){
   const currency=b.dataset.currency;if(!['emerald','diamond'].includes(currency))return;
   const cost=currency==='emerald'?20:1;if((currency==='emerald'?balance():diamondBalance())<cost){toast('宝石不足，先完成今天的小任务。');return;}
-  dialog('打开一个盲盒？','<p>使用 '+(currency==='emerald'?'20 颗绿宝石':'1 颗钻石')+'，随机抽一张卡。结果会保存到卡片清单。</p><p class="small">七种卡机会相同，可以重复。确认后不能取消抽取或退回宝石重抽。</p><div class="dialog-actions"><button class="secondary" data-close>先不抽</button><button class="primary" data-action="confirm-draw" data-currency="'+currency+'">确认抽取</button></div>');
+  dialog('打开一个盲盒？','<p>使用 '+(currency==='emerald'?paymentLabel({cost:20,...payment(20)}):'1 颗钻石')+'，随机抽一张卡。结果会保存到卡片清单。</p><p class="small">七种卡机会相同，可以重复。确认后不能取消抽取或退回宝石重抽。</p><div class="dialog-actions"><button class="secondary" data-close>先不抽</button><button class="primary" data-action="confirm-draw" data-currency="'+currency+'">确认抽取</button></div>');
  }
  if(action==='confirm-draw'){
   const currency=b.dataset.currency;if(!['emerald','diamond'].includes(currency))return;
   const cost=currency==='emerald'?20:1;let card;
-  const ok=await commit(s=>{if((currency==='emerald'?balance(s):diamondBalance(s))<cost)throw new Error('宝石不足。');card=chooseCard();s.draws.push({id:uid(),cardId:card.id,currency,cost,createdAt:new Date().toISOString(),usedAt:null});},'',true);
+  const ok=await commit(s=>{if((currency==='emerald'?balance(s):diamondBalance(s))<cost)throw new Error('宝石不足。');card=chooseCard();s.draws.push({id:uid(),cardId:card.id,currency,cost,...(currency==='emerald'?payment(cost,s):{rubyCost:0}),createdAt:new Date().toISOString(),usedAt:null});},'',true);
   if(ok)dialog('你抽到了！','<div class="card-reveal"><span>'+card.icon+'</span><h3>'+esc(card.name)+'</h3><p>'+esc(card.description)+'</p><small>已经放入你的卡片清单。</small></div><div class="dialog-actions"><button class="primary" data-close>收好卡片</button></div>');
  }
  if(action==='use-card'){const r=state.draws.find(r=>r.id===id);if(r&&!r.usedAt){const c=cardTypes.find(c=>c.id===r.cardId);confirmDialog('家长确认 · '+c.name,'确认这张卡的家务或活动已经完成，核销后保留历史记录。','confirm-use-card',id,'确认完成');}}
@@ -347,12 +376,12 @@ document.addEventListener('click',async event=>{
  if(action==='edit-reward')rewardDialog(id);
  if(action==='delete-reward')confirmDialog('移除这份奖励？','商店里不再展示它，过去的兑换记录仍然保留。','confirm-delete-reward',id,'移除');
  if(action==='confirm-delete-reward')await commit(s=>s.rewards=s.rewards.filter(r=>r.id!==id),'奖励已移除。',true);
- if(action==='redeem') {const r=state.rewards.find(r=>r.id===id);if(r&&balance()>=r.cost)confirmDialog('兑换「'+r.name+'」？','使用 '+r.cost+' 颗绿宝石，兑换后还剩 '+(balance()-r.cost)+' 颗。请和家长确认这个约定。','confirm-redeem',id,'确认兑换');}
- if(action==='confirm-redeem') {const r=state.rewards.find(r=>r.id===id);if(!r||balance()<r.cost){formError('绿宝石不足，或这份奖励已被修改。');return;}await commit(s=>s.redemptions.push({id:uid(),rewardId:r.id,name:r.name,cost:r.cost,createdAt:new Date().toISOString(),fulfilledAt:null}),'兑换成功，和家长一起安排时间吧。',true);}
+ if(action==='redeem') {const r=state.rewards.find(r=>r.id===id);if(r&&balance()>=r.cost)confirmDialog('兑换「'+r.name+'」？','使用 '+r.cost+' 颗宝石（绿宝石与红宝石等值），兑换后还剩 '+(balance()-r.cost)+' 颗。请和家长确认这个约定。','confirm-redeem',id,'确认兑换');}
+ if(action==='confirm-redeem') {const r=state.rewards.find(r=>r.id===id);if(!r||balance()<r.cost){formError('绿宝石和红宝石不足，或这份奖励已被修改。');return;}await commit(s=>s.redemptions.push({id:uid(),rewardId:r.id,name:r.name,cost:r.cost,...payment(r.cost,s),createdAt:new Date().toISOString(),fulfilledAt:null}),'兑换成功，和家长一起安排时间吧。',true);}
  if(action==='fulfill')confirmDialog('家长确认：已经兑现？','确认这份奖励已经完成，留下你们一起的好时光。','confirm-fulfill',id,'已经兑现');
  if(action==='confirm-fulfill')await commit(s=>{const r=s.redemptions.find(r=>r.id===id);if(r&&!r.fulfilledAt)r.fulfilledAt=new Date().toISOString();},'这份小期待已经兑现。',true);
- if(action==='cancel-redemption')confirmDialog('取消这次兑换？','尚未兑现的奖励可以取消，绿宝石会退回。','confirm-cancel-redemption',id,'取消兑换');
- if(action==='confirm-cancel-redemption')await commit(s=>s.redemptions=s.redemptions.filter(r=>r.id!==id||r.fulfilledAt),'兑换已取消，绿宝石已退回。',true);
+ if(action==='cancel-redemption')confirmDialog('取消这次兑换？','尚未兑现的奖励可以取消，使用的绿宝石和红宝石会按原数量退回。','confirm-cancel-redemption',id,'取消兑换');
+ if(action==='confirm-cancel-redemption')await commit(s=>s.redemptions=s.redemptions.filter(r=>r.id!==id||r.fulfilledAt),'兑换已取消，宝石已按原颜色退回。',true);
  if(action==='export')await exportBackup();
  if(action==='import')$('#import-file').click();
  if(action==='confirm-import'){if(!pendingImport)return;const imported=pendingImport;const ok=await commit(s=>{Object.keys(s).forEach(k=>delete s[k]);Object.assign(s,imported);},'备份已恢复。',true);if(ok)pendingImport=null;}
@@ -368,10 +397,14 @@ document.addEventListener('change',event=>{
 document.addEventListener('submit',async event=>{
  const form=event.target;event.preventDefault();if(busy||!form.checkValidity())return;
  const data=new FormData(form);
- if(['difficulty-form','diamond-form','plan-form'].includes(form.id)&&selectedDate!==dateKey()){formError('这一天已经结束，不能再打卡。');return;}
+ if(['difficulty-form','diamond-form','plan-form','ruby-form'].includes(form.id)&&selectedDate!==dateKey()){formError('这一天已经结束，不能再打卡。');return;}
  if(form.id==='difficulty-form'){const choice=data.get('difficulty');if(!choice){formError('先选一下今天的情况。');return;}const already=dayData().tasks[1];const ok=await commit(s=>{requireToday();const d=s.days[selectedDate] ||= structuredClone(dayData());d.tasks[1]=true;d.difficulty=choice;},already?'今天的办法已更新。':'你找到了办法，获得 1 颗绿宝石。',true);if(ok)dayDialog();}
  if(form.id==='plan-form'){
   const time=data.get('planTime');const ok=await commit(s=>{requireToday();if(!isWeekend(selectedDate))throw new Error('周中使用固定开始时间。');s.plans[selectedDate]=time;},'今日约定已保存。',true);if(ok)dayDialog();
+ }
+ if(form.id==='ruby-form'){
+  const i=Number(form.dataset.index),finishedAt=data.get('finishedAt');
+  const ok=await commit(s=>{requireToday();if(!isWednesday(selectedDate)||!Number.isInteger(i)||i<0||i>=4)throw new Error('只有周三可以领取额外任务奖励。');if(typeof finishedAt!=='string'||!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(finishedAt)||finishedAt>'20:30')throw new Error('请填写不晚于 20:30 的实际完成时间。');const d=s.days[selectedDate] ||= structuredClone(dayData());if(d.extraTasks[i])throw new Error('这一项已获得红宝石，不能重复领取。');d.extraTasks[i]=finishedAt;},'获得 1 颗红宝石！',true);if(ok)dayDialog();
  }
  if(form.id==='diamond-form'){
   const finishedAt=data.get('finishedAt');if(!finishedAt||finishedAt>'20:00'||data.getAll('quality').length!==3||!data.get('parentConfirm')){formError('请核对三个动作、家长确认和 20:00 前的实际完成时间。');return;}
@@ -413,7 +446,7 @@ let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state){if(selectedDate!==dateKey()&&!state.days[selectedDate])selectedDate=dateKey();render();}});
 async function init() {
  try {
-   db=await openDB();const saved=await readDB();state=saved?validateState(saved):defaultState();if(saved?.version===1)await writeDB(state);
+   db=await openDB();const saved=await readDB();state=saved?validateState(saved):defaultState();if(saved&&saved.version!==3)await writeDB(state);
    db.onversionchange=()=>{db.close();toast('应用已在另一个页面更新，请刷新。');};
    page=['today','records','rewards'].includes(location.hash.slice(1))?location.hash.slice(1):'today';
    render();$('#save-state').textContent='已保存在此设备';

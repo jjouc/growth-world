@@ -1,4 +1,4 @@
-const CACHE = 'growth-world-v3';
+const CACHE = 'growth-world-v4';
 const FILES = ['./', './index.html', './style.css', './app.js', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(FILES)).then(() => self.skipWaiting()));
